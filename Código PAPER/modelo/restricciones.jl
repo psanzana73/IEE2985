@@ -65,7 +65,7 @@ function generar_restricciones(modelo, par, set, var; u0=nothing, p0=nothing, en
 
     # --- Mapeo de Buses ---
     bus_idx = Dict(_bus_key(par.buses[b].bus_id) => b for b in set.BusSet)
-    known_bus_keys = collect(keys(bus_idx))
+    
 
     # --- Mapeo de Ramas (DC Flow) ---
     L = length(par.impedances)
@@ -283,8 +283,8 @@ function add_scc_constraints!(modelo, par, set, var)
     # (Usando mu para Z*u)
     
     @constraint(modelo, [F=1:nb, t in set.TimeSet],
-        - sum( Ig[g] * mu[F,g,t] for g in G )
-        - (isempty(C) ? 0.0 : sum( _F(par.ibgs[c].If_pu; default=1.0) * _alpha_c(c,t) * Z[F, Phi[c], t] for c in C ))
+        sum( Ig[g] * mu[F,g,t] for g in G )
+        + (isempty(C) ? 0.0 : sum( _F(par.ibgs[c].If_pu; default=1.0) * _alpha_c(c,t) * Z[F, Phi[c], t] for c in C ))
         >= _F(par.buses[F].IminSCC; default=0.0) * Z[F,F,t]
     )
 
