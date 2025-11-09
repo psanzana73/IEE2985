@@ -100,7 +100,7 @@ function read_input_data(data_path::String)
     end
 
     scc = SCCParams(0.95, 1.0, 1)  # alpha = 1.0
-    freq = FreqParams(50, 10, 0.8, 0.005, 0.5, 0.5)
+    freq = FreqParams(20, 10, 0.8, 0.005, 0.5, 0.5)
 
     return generators, buses, impedances, ibgs, scc, freq
 end

@@ -23,6 +23,22 @@ function _collect_columns(df::DataFrame)
     return columns, headers
 end
 
+const DEFAULT_FREQUENCY = 50.0
+
+function _freq_nominal(par)
+    hasproperty(par, :freq) || return DEFAULT_FREQUENCY
+    freq = par.freq
+    if hasproperty(freq, :f_base)
+        return _F(getfield(freq, :f_base); default=DEFAULT_FREQUENCY)
+    elseif hasproperty(freq, :f_nominal)
+        return _F(getfield(freq, :f_nominal); default=DEFAULT_FREQUENCY)
+    else
+        return DEFAULT_FREQUENCY
+    end
+end
+
+_freq_delta_p(par) = hasproperty(par, :freq) ? abs(_F(par.freq.delta_P; default=0.0)) : 0.0
+
 function export_results_to_excel(par, set, var, filepath::AbstractString)
     mkpath(dirname(filepath))
     rows = NamedTuple{(:generator, :bus_id, :time, :u, :p), Tuple{Int, Any, Int, Float64, Float64}}[]
@@ -77,13 +93,53 @@ function export_results_to_excel(par, set, var, filepath::AbstractString)
     end
     scc_df = DataFrame(scc_rows)
 
+    freq_sheet = nothing
+    if hasproperty(par, :freq)
+        freq_rows = NamedTuple{(:time, :inertia_equiv, :rocof, :frequency),
+                               Tuple{Int, Float64, Float64, Float64}}[]
+        delta_P = _freq_delta_p(par)
+        f_nominal = _freq_nominal(par)
+        for t in set.TimeSet
+            H_sum = 0.0
+            for g in set.GeneratorSet
+                H_g = _F(par.generators[g].H_c; default=0.0)
+                Pmax_g = _F(par.generators[g].Pmax; default=0.0)
+                H_sum += H_g * Pmax_g * value(var.u[g,t])
+            end
+            if H_sum <= 0.0 || delta_P == 0.0
+                rocof = 0.0
+                freq_val = f_nominal
+            else
+                rocof = (f_nominal * delta_P) / (2.0 * H_sum)
+                freq_val = max(f_nominal - rocof, 0.0)
+            end
+            push!(freq_rows, (
+                time = t,
+                inertia_equiv = H_sum,
+                rocof = rocof,
+                frequency = freq_val
+            ))
+        end
+        freq_df = DataFrame(freq_rows)
+        freq_columns, freq_headers = _collect_columns(freq_df)
+        freq_sheet = (freq_columns, freq_headers)
+    end
+
     gen_columns, gen_headers = _collect_columns(gen_df)
     scc_columns, scc_headers = _collect_columns(scc_df)
 
-    XLSX.writetable(filepath;
-        overwrite=true,
-        Generadores=(gen_columns, gen_headers),
-        Cortocircuito=(scc_columns, scc_headers))
+    if freq_sheet === nothing
+        XLSX.writetable(filepath;
+            overwrite=true,
+            Generadores=(gen_columns, gen_headers),
+            Cortocircuito=(scc_columns, scc_headers))
+    else
+        XLSX.writetable(filepath;
+            overwrite=true,
+            Generadores=(gen_columns, gen_headers),
+            Cortocircuito=(scc_columns, scc_headers),
+            Frecuencia=freq_sheet)
+    end
 end
 
 println("Construyendo el modelo...")

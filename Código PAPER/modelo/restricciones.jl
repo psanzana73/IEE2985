@@ -184,10 +184,47 @@ function generar_restricciones(modelo, par, set, var; u0=nothing, p0=nothing, en
         p[g,t-1] - p[g,t] <= _F(par.generators[g].Ramp) * u[g,t] + _F(par.generators[g].Pmin) * (_z(var))[g,t]
     )
     
+    # --- Restricciones de frecuencia ---
+    add_rocof_constraint!(modelo, par, set, var)
+
     # --- Restricciones de SCC ---
     add_scc_constraints!(modelo, par, set, var)
 
     return nothing
+end
+
+# =========================
+#   Frecuencia
+# =========================
+
+const DEFAULT_F_NOMINAL = 50.0  # Hz, se usa si no se entrega en los datos
+
+function add_rocof_constraint!(modelo, par, set, var)
+    hasproperty(par, :freq) || return
+
+    delta_P = abs(_F(par.freq.delta_P; default=0.0))
+    f_rocof = _F(par.freq.f_rocof; default=0.0)
+    if delta_P == 0.0 || f_rocof <= 0.0
+        return
+    end
+
+    f_nominal = if hasproperty(par.freq, :f_base)
+        _F(getfield(par.freq, :f_base); default=DEFAULT_F_NOMINAL)
+    elseif hasproperty(par.freq, :f_nominal)
+        _F(getfield(par.freq, :f_nominal); default=DEFAULT_F_NOMINAL)
+    else
+        DEFAULT_F_NOMINAL
+    end
+
+    inertia_req = (f_nominal * delta_P) / (2.0 * f_rocof)
+    inertia_coeff = [ _F(par.generators[g].H_c; default=0.0) * _F(par.generators[g].Pmax; default=0.0)
+                      for g in set.GeneratorSet ]
+    isempty(inertia_coeff) && return
+
+    u = var.u
+    @constraint(modelo, RoCoF[t in set.TimeSet],
+        sum(inertia_coeff[g] * u[g,t] for g in set.GeneratorSet) >= inertia_req
+    )
 end
 
 # =========================
