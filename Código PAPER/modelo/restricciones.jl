@@ -231,8 +231,6 @@ end
 #   SCC
 # =========================
 
-const ZMAX_SCC = 10.0  # Límite p.u. para variables Z (McCormick)
-
 function add_scc_constraints!(modelo, par, set, var)
     @assert hasproperty(var, :Z)  "Falta var.Z[i,j,t] en variables.jl"
     @assert hasproperty(var, :mu) "Falta var.mu[i,g,t] en variables.jl"
@@ -290,12 +288,12 @@ function add_scc_constraints!(modelo, par, set, var)
     Ig   = [ (beta * Vn) / (Xdpp[g] == 0.0 ? 0.2 : Xdpp[g]) for g in G ] # Evita división por cero
 
     # --- Acotamos Z y McCormick para μ = Z[:,Ψ(g),t] * u[g,t] ---
-    @constraint(modelo, [i=1:nb, j=1:nb, t in set.TimeSet], -ZMAX_SCC <= Z[i,j,t] <= ZMAX_SCC)
-
-    @constraint(modelo, [i=1:nb, g in G, t in set.TimeSet],  mu[i,g,t] <=  Z[i, Psi[g], t] + (1 - u[g,t]) * ZMAX_SCC)
-    @constraint(modelo, [i=1:nb, g in G, t in set.TimeSet],  mu[i,g,t] >=  Z[i, Psi[g], t] - (1 - u[g,t]) * ZMAX_SCC)
-    @constraint(modelo, [i=1:nb, g in G, t in set.TimeSet],  mu[i,g,t] <=  u[g,t] * ZMAX_SCC)
-    @constraint(modelo, [i=1:nb, g in G, t in set.TimeSet],  mu[i,g,t] >= -u[g,t] * ZMAX_SCC)
+    @constraint(modelo, [i=1:nb, j=1:nb, t in set.TimeSet], -_F(par.scc.Z_max; default=10.0) <= Z[i,j,t] <= _F(par.scc.Z_max; default=10.0))
+    
+    @constraint(modelo, [i=1:nb, g in G, t in set.TimeSet],  mu[i,g,t] <=  Z[i, Psi[g], t] + (1 - u[g,t]) * _F(par.scc.Z_max; default=10.0))
+    @constraint(modelo, [i=1:nb, g in G, t in set.TimeSet],  mu[i,g,t] >=  Z[i, Psi[g], t] - (1 - u[g,t]) * _F(par.scc.Z_max; default=10.0))
+    @constraint(modelo, [i=1:nb, g in G, t in set.TimeSet],  mu[i,g,t] <=  u[g,t] * _F(par.scc.Z_max; default=10.0))
+    @constraint(modelo, [i=1:nb, g in G, t in set.TimeSet],  mu[i,g,t] >= -u[g,t] * _F(par.scc.Z_max; default=10.0))
 
     # --- Igualdades: Z * (Y0 + Yg(u)) = I ---
     # Yg(u) es una matriz diagonal con 1/Xdpp si el generador g está en el bus j
