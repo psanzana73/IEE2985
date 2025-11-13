@@ -26,6 +26,7 @@ struct IBGData # Generador en base a inversores
     bus_id ::Any
     bus_name ::Any
     type ::Any      # (3: IBG)
+    Pmax   ::Any
     gamma ::Any
     If_pu  ::Any
     Hs_max ::Any
@@ -37,6 +38,7 @@ struct BusData
     type ::Any      # (0: PQ)
     Pd ::Any
     IminSCC ::Any # Límite fijado (0, 2, 5, 10)
+    B_shunt ::Any
 end
 
 struct MatrizImpedancia
@@ -80,8 +82,7 @@ function read_input_data(data_path::String)
         demanda = [row.t1, row.t2, row.t3, row.t4, row.t5, row.t6, row.t7, row.t8, row.t9, row.t10,
                    row.t11, row.t12, row.t13, row.t14, row.t15, row.t16, row.t17, row.t18, row.t19, row.t20,
                    row.t21, row.t22, row.t23, row.t24]
-        push!(buses, BusData(row.id, row.Nombre, row.Tipo, demanda, 2.0))
-
+        push!(buses, BusData(row.id, row.Nombre, row.Tipo, demanda, 2.0, row.Bshunt))
 
         if row.Tipo == 1 || row.Tipo == 2
             push!(generators, GeneratorData(row.id, row.Nombre, row.Tipo,
@@ -92,7 +93,7 @@ function read_input_data(data_path::String)
         end
 
         if row.Tipo == 3
-            push!(ibgs, IBGData(row.id, row.Nombre, row.Tipo, 0.1, 1, row.H))
+            push!(ibgs, IBGData(row.id, row.Nombre, row.Tipo, row.Pmax, 0.1, 1, row.H))
         end
     end
 
@@ -100,7 +101,7 @@ function read_input_data(data_path::String)
         push!(impedances, MatrizImpedancia(row.From, row.To, row.R, row.X, row.B))
     end
 
-    scc = SCCParams(0.95, 1.0, 1, 10)  # alpha = 1.0, Z_max = 10
+    scc = SCCParams(0.95, 1.0, 1, 10)
     freq = FreqParams(20, 10, 0.8, 0.005, 0.5, 0.5)
 
     return generators, buses, impedances, ibgs, scc, freq

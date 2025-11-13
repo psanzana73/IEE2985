@@ -1,16 +1,12 @@
 include("modelo/parametros.jl")
 include("modelo/variables.jl")
 include("modelo/restricciones.jl")
-
-# 2. Incluir el módulo principal que los utiliza
-# (Este archivo debe ir al final, ya que usa los de arriba)
 include("modelo/unit_commitment.jl") 
 
-# 3. Usar el módulo principal para construir y resolver
 using .ModeloUC
 using .Restricciones: _bus_key, _F
 using DataFrames
-using JuMP: value
+using JuMP: value, set_optimizer_attribute, compute_conflict!, all_constraints, get_optimizer_attribute
 using MathOptInterface
 using XLSX
 
@@ -53,8 +49,9 @@ function export_results_to_excel(par, set, var, filepath::AbstractString)
     end
     gen_df = DataFrame(rows)
 
-    scc_rows = NamedTuple{(:bus_index, :bus_id, :time, :I_syn, :I_ibg, :I_total, :I_limit),
-                          Tuple{Int, Any, Int, Float64, Float64, Float64, Float64}}[]
+    scc_rows = NamedTuple{(:bus_index, :bus_id, :time, :I_syn, :I_ibg, :I_total, :I_limit_param, :I_limit_real),
+                          Tuple{Int, Any, Int, Float64, Float64, Float64, Float64, Float64}}[]
+    
     nb = length(par.buses)
     bus_idx = Dict(_bus_key(par.buses[b].bus_id) => b for b in 1:nb)
     G   = set.GeneratorSet
@@ -69,26 +66,35 @@ function export_results_to_excel(par, set, var, filepath::AbstractString)
     end
     alpha_val = _F(par.scc.alpha; default=1.0)
 
+    
     for F in set.BusSet, t in set.TimeSet
-        I_syn = 0.0
+        term_syn = 0.0
         for g in G
-            I_syn += Ig[g] * value(var.mu[F,g,t])
+            try term_syn += Ig[g] * value(var.mu[F,g,t]) catch; end
         end
-        I_ibg = 0.0
+        
+        term_ibg = 0.0
         if !isempty(C)
             for (c_idx, c) in enumerate(C)
-                I_ibg += _F(par.ibgs[c].If_pu; default=1.0) * alpha_val * value(var.Z[F, Phi[c_idx], t])
+                try term_ibg += _F(par.ibgs[c].If_pu; default=1.0) * alpha_val * value(var.Z[F, Phi[c_idx], t]) catch; end
             end
         end
-        I_total = I_syn + I_ibg
+        I_syn_real   = term_syn
+        I_ibg_real   = term_ibg
+        I_total_real = (I_syn_real + I_ibg_real) / value(var.Z[F,F,t])
+
+        I_limit_param = _F(par.buses[F].IminSCC; default=0.0) # ej: 2.0
+        I_limit_real  = I_limit_param
+
         push!(scc_rows, (
             bus_index = F,
             bus_id    = par.buses[F].bus_id,
             time      = t,
-            I_syn     = I_syn,
-            I_ibg     = I_ibg,
-            I_total   = I_total,
-            I_limit   = _F(par.buses[F].IminSCC; default=0.0)
+            I_syn     = I_syn_real,    # Contribución física de SGs
+            I_ibg     = I_ibg_real,    # Contribución física de IBGs
+            I_total   = I_total_real,  # SCC total (debe ser >= I_limit_real)
+            I_limit_param = I_limit_param, # El parámetro base (ej. 2.0)
+            I_limit_real = I_limit_real   # El límite real (ej. 0.2)
         ))
     end
     scc_df = DataFrame(scc_rows)
@@ -125,8 +131,9 @@ function export_results_to_excel(par, set, var, filepath::AbstractString)
         freq_sheet = (freq_columns, freq_headers)
     end
 
+    # Esto capturará automáticamente los nuevos nombres de columnas
     gen_columns, gen_headers = _collect_columns(gen_df)
-    scc_columns, scc_headers = _collect_columns(scc_df)
+    scc_columns, scc_headers = _collect_columns(scc_df) 
 
     if freq_sheet === nothing
         XLSX.writetable(filepath;
@@ -158,14 +165,47 @@ impedance_df = DataFrame([(
 ) for linea in par.impedances])
 println(impedance_df)
 
+set_optimizer_attribute(modelo, "DualReductions", 0)
+println("\n[Acción] Parámetro 'DualReductions = 0' (Gurobi) establecido para forzar estado.")
+
+println("Resolviendo el modelo...")
 status = ModeloUC.solve_modelo(modelo)
 
 if status == MOI.OPTIMAL
     output_path = joinpath(@__DIR__, "modelo", "data", "output", "resultados.xlsx")
     export_results_to_excel(par, set, var, output_path)
     println("Resultados exportados a: $output_path")
-else
-    println("No se exportan resultados porque el estado es $status")
-end
 
-println("Fin de la ejecución.")
+elseif status == MOI.INFEASIBLE
+    println("="^50)
+    println("              EL MODELO ES INFACTIBLE              ")
+    println("="^50)
+    println("Calculando el conjunto de restricciones en conflicto (IIS)...")
+    println("Asegúrate de estar usando Gurobi o CPLEX.")
+
+    try
+        compute_conflict!(modelo)
+        iis_status = get_optimizer_attribute(modelo, MOI.ConflictStatus())
+        conflict_constraints = all_constraints(modelo, include_variable_in_set_constraints = true)[iis_status .== MOI.IN_CONFLICT]
+        
+        if isempty(conflict_constraints)
+            println("\nNo se pudo identificar un IIS automáticamente.")
+            println("Verifica que el solver (ej. Gurobi) esté correctamente configurado.")
+        else
+            println("\nSe encontraron $(length(conflict_constraints)) restricciones en conflicto:")
+            
+            for constr_ref in conflict_constraints
+                println("  - ", constr_ref)
+            end
+            println("\nRevisa estas restricciones. El conflicto está entre ellas.")
+        end
+
+    catch e
+        println("\nError al intentar calcular el IIS: $e")
+        println("Asegúrate de que tu versión de JuMP sea compatible y que el solver (Gurobi/CPLEX) esté instalado.")
+    end
+
+else
+    println("El modelo no es óptimo. Estado: $status")
+    println("No se exportan resultados.")
+end

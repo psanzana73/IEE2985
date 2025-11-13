@@ -86,17 +86,19 @@ function generar_restricciones(modelo, par, set, var; u0=nothing, p0=nothing, en
 
     # ========== 1) KCL (balance nodal DC) ==========
     @constraint(modelo, KCL[t in set.TimeSet, b in set.BusSet],
-        # Inyección de Generadores Síncronos en el bus b
-        sum(p[g,t] for g in set.GeneratorSet if _bus_key(par.generators[g].bus_id) == _bus_key(par.buses[b].bus_id))
-        
-        # Demanda en el bus b
-        - _demand(par, b, t)
-        ==
-        # Flujo saliente de b
-        sum(Bij[br] * (theta[b,t] - theta[to_idx[br],t]) for br in 1:L if from_idx[br] == b) +
-        # Flujo entrante a b
-        sum(Bij[br] * (theta[b,t] - theta[from_idx[br],t]) for br in 1:L if to_idx[br] == b)
-    )
+    # Inyección de Generadores Síncronos (SGs) en el bus b
+    sum(p[g,t] for g in set.GeneratorSet if _bus_key(par.generators[g].bus_id) == _bus_key(par.buses[b].bus_id))
+    
+    + sum( _F(par.ibgs[c].Pmax; default=0.0) * _F(par.scc.alpha; default=1.0) 
+           for c in (hasproperty(set, :IBGSet) ? set.IBGSet : Base.OneTo(0)) 
+           if _bus_key(par.ibgs[c].bus_id) == _bus_key(par.buses[b].bus_id))
+    - _demand(par, b, t)
+    ==
+    # Flujo saliente de b
+    sum(Bij[br] * (theta[b,t] - theta[to_idx[br],t]) for br in 1:L if from_idx[br] == b) +
+    # Flujo entrante a b
+    sum(Bij[br] * (theta[b,t] - theta[from_idx[br],t]) for br in 1:L if to_idx[br] == b)
+)
 
     # ========== 2) Límites Pmin/Pmax (Generadores Síncronos) ==========
     @constraint(modelo, PminLimit[g in set.GeneratorSet, t in set.TimeSet],
@@ -262,15 +264,38 @@ function add_scc_constraints!(modelo, par, set, var)
         Bij[ℓ] = 1.0 / X
     end
 
-    # --- Y0 (Matriz de admitancia de red pasiva, nb x nb) ---
     Y0 = zeros(Float64, nb, nb)
+
     for ℓ in 1:L
-        i = from_idx[ℓ]; j = to_idx[ℓ]; B = Bij[ℓ]
-        Y0[i,i] += B;  Y0[j,j] += B
-        Y0[i,j] -= B;  Y0[j,i] -= B
+        i = from_idx[ℓ]
+        j = to_idx[ℓ]
+        
+        B_series = Bij[ℓ] 
+
+        B_shunt_linea = _F(par.impedances[ℓ].B; default=0.0) / 2.0
+        
+        Y0[i,j] -= B_series
+        Y0[j,i] -= B_series
+        Y0[i,i] += B_series
+        Y0[j,j] += B_series
+        Y0[i,i] += B_shunt_linea
+        Y0[j,j] += B_shunt_linea
     end
 
-    # --- Índices de generadores síncronos por barra Ψ(g) ---
+    try
+        for i in 1:nb
+            # Aquí usamos el nuevo campo 'B_shunt' del struct
+            Y0[i,i] += _F(par.buses[i].B_shunt; default=0.0)
+        end
+    catch e
+        println("ADVERTENCIA: No se pudo leer 'par.buses[i].B_shunt'.")
+        println("Asegúrate de que tu Excel 'BUS DATA' tenga la columna correcta.")
+    end
+
+    for i in 1:nb
+        Y0[i,i] += 1e-3
+    end
+
     G   = set.GeneratorSet
     Psi = [ bus_idx[_bus_key(par.generators[g].bus_id)] for g in G ]
 
@@ -280,9 +305,7 @@ function add_scc_constraints!(modelo, par, set, var)
 
     # --- Corriente Norton SG: I_g = (β·Vn)/Xd″_g ---
     
-    # ADAPTACIÓN 1: par.scc.betaE cambiado a par.scc.beta
     beta = _F(par.scc.beta; default=0.95) 
-    
     Vn   = _F(par.scc.Vn; default=1.0)
     Xdpp = [ _F(par.generators[g].Xdpp; default=0.2) for g in G ]
     Ig   = [ (beta * Vn) / (Xdpp[g] == 0.0 ? 0.2 : Xdpp[g]) for g in G ] # Evita división por cero
@@ -305,8 +328,6 @@ function add_scc_constraints!(modelo, par, set, var)
 
     # --- Función auxiliar para alpha (parámetro de IBGs) ---
     
-    # ADAPTACIÓN 2: Se reemplazó la lógica de Diccionario 
-    # para usar el valor 'alpha' simple de tu struct SCCParams.
     function _alpha_c(c::Int, t::Int)
         # Simplemente retorna el valor único de alpha, independientemente de c o t.
         return _F(par.scc.alpha; default=1.0)
@@ -314,16 +335,14 @@ function add_scc_constraints!(modelo, par, set, var)
 
     # --- Límite SCC por barra/tiempo ---
     # Ecuación (16a) del paper, reformulada:
-    # -sum(I_g * Z_FΨ(g) * u_g) - sum(I_fc * α_c * Z_FΦ(c)) >= I_Flim * Z_FF
     # (Usando mu para Z*u)
     
     @constraint(modelo, [F=1:nb, t in set.TimeSet],
-        sum( Ig[g] * mu[F,g,t] for g in G )
-        + (isempty(C) ? 0.0 : sum( _F(par.ibgs[c].If_pu; default=1.0) * _alpha_c(c,t) * Z[F, Phi[c], t] for c in C ))
-        >= _F(par.buses[F].IminSCC; default=0.0) * Z[F,F,t]
-    )
+    sum( Ig[g] * mu[F,g,t] for g in G)
+    + (isempty(C) ? 0.0 : sum( _F(par.ibgs[c].If_pu; default=1.0) * _alpha_c(c,t) * Z[F, Phi[c], t] for c in C))
+    >= _F(par.buses[F].IminSCC) * Z[F,F,t])
 
     return nothing
 end
 
-end # Fin del Módulo
+end
