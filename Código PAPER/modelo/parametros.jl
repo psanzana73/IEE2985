@@ -82,7 +82,7 @@ function read_input_data(data_path::String)
         demanda = [row.t1, row.t2, row.t3, row.t4, row.t5, row.t6, row.t7, row.t8, row.t9, row.t10,
                    row.t11, row.t12, row.t13, row.t14, row.t15, row.t16, row.t17, row.t18, row.t19, row.t20,
                    row.t21, row.t22, row.t23, row.t24]
-        push!(buses, BusData(row.id, row.Nombre, row.Tipo, demanda, 2.0, row.Bshunt))
+        push!(buses, BusData(row.id, row.Nombre, row.Tipo, demanda, 2, row.Bshunt))
 
         if row.Tipo == 1 || row.Tipo == 2
             push!(generators, GeneratorData(row.id, row.Nombre, row.Tipo,

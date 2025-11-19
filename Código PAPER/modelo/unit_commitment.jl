@@ -11,7 +11,7 @@ import ..Objetivo
 import ..Restricciones
 
 # Define la ruta a tus datos
-const DATA_PATH = joinpath(@__DIR__, "data", "input", "datos_finales30.xlsx")
+const DATA_PATH = joinpath(@__DIR__, "data", "input", "datos_finales30_pen27.xlsx")
 
 export construir_modelo, solve_modelo
 
