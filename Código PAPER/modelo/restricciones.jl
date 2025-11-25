@@ -86,20 +86,25 @@ function generar_restricciones(modelo, par, set, var; u0=nothing, p0=nothing, en
 
     # ========== 1) KCL (balance nodal DC) ==========
     @constraint(modelo, KCL[t in set.TimeSet, b in set.BusSet],
-    # Inyección de Generadores Síncronos (SGs) en el bus b
+    # Generadores Síncronos
     sum(p[g,t] for g in set.GeneratorSet if _bus_key(par.generators[g].bus_id) == _bus_key(par.buses[b].bus_id))
-    
-    + sum( _F(par.ibgs[c].Pmax; default=0.0) * _F(par.scc.alpha; default=1.0) 
-           for c in (hasproperty(set, :IBGSet) ? set.IBGSet : Base.OneTo(0)) 
-           if _bus_key(par.ibgs[c].bus_id) == _bus_key(par.buses[b].bus_id))
+    + sum(var.p_ibg[c,t] for c in (hasproperty(set, :IBGSet) ? set.IBGSet : Base.OneTo(0)) 
+          if _bus_key(par.ibgs[c].bus_id) == _bus_key(par.buses[b].bus_id))
     - _demand(par, b, t)
     ==
     # Flujo saliente de b
     sum(Bij[br] * (theta[b,t] - theta[to_idx[br],t]) for br in 1:L if from_idx[br] == b) +
     # Flujo entrante a b
     sum(Bij[br] * (theta[b,t] - theta[from_idx[br],t]) for br in 1:L if to_idx[br] == b)
-)
+    )
 
+    # ========== 1.1) Límite de Potencia IBG (Recurso Renovable) ==========
+    if hasproperty(set, :IBGSet) && !isempty(set.IBGSet)
+        @constraint(modelo, LimitIBG[c in set.IBGSet, t in set.TimeSet],
+        var.p_ibg[c,t] <= _F(par.ibgs[c].Pmax; default=0.0) * _F(par.scc.alpha; default=1.0)
+        )
+    end     
+    
     # ========== 2) Límites Pmin/Pmax (Generadores Síncronos) ==========
     @constraint(modelo, PminLimit[g in set.GeneratorSet, t in set.TimeSet],
         p[g,t] >= _F(par.generators[g].Pmin) * u[g,t]
@@ -187,7 +192,7 @@ function generar_restricciones(modelo, par, set, var; u0=nothing, p0=nothing, en
     )
     
     # --- Restricciones de frecuencia ---
-    add_rocof_constraint!(modelo, par, set, var)
+    # add_rocof_constraint!(modelo, par, set, var)
 
     # --- Restricciones de SCC ---
     add_scc_constraints!(modelo, par, set, var)
@@ -284,7 +289,6 @@ function add_scc_constraints!(modelo, par, set, var)
 
     try
         for i in 1:nb
-            # Aquí usamos el nuevo campo 'B_shunt' del struct
             Y0[i,i] += _F(par.buses[i].B_shunt; default=0.0)
         end
     catch e
@@ -319,7 +323,6 @@ function add_scc_constraints!(modelo, par, set, var)
     @constraint(modelo, [i=1:nb, g in G, t in set.TimeSet],  mu[i,g,t] >= -u[g,t] * _F(par.scc.Z_max; default=10.0))
 
     # --- Igualdades: Z * (Y0 + Yg(u)) = I ---
-    # Yg(u) es una matriz diagonal con 1/Xdpp si el generador g está en el bus j
     @constraint(modelo, [i=1:nb, j=1:nb, t in set.TimeSet],
         sum( Z[i,k,t] * Y0[k,j] for k in 1:nb )
         + sum( (1.0 / Xdpp[g]) * mu[i,g,t] * (j == Psi[g] ? 1.0 : 0.0) for g in G )
@@ -327,7 +330,6 @@ function add_scc_constraints!(modelo, par, set, var)
     )
 
     # --- Función auxiliar para alpha (parámetro de IBGs) ---
-    
     function _alpha_c(c::Int, t::Int)
         # Simplemente retorna el valor único de alpha, independientemente de c o t.
         return _F(par.scc.alpha; default=1.0)

@@ -28,13 +28,14 @@ function definir_variables(modelo::JuMP.Model, set)
     p     = @variable(modelo, p[set.GeneratorSet,set.TimeSet] >= 0) # Potencia generada
     w     = @variable(modelo, w[set.GeneratorSet,set.TimeSet], Bin) # 1 si arranca (Startup)
     v     = @variable(modelo, v[set.GeneratorSet,set.TimeSet], Bin) # 1 si se apaga (Shutdown)
+    p_ibg = @variable(modelo, p_ibg[set.IBGSet, set.TimeSet] >= 0)
     theta = @variable(modelo, theta[set.BusSet,set.TimeSet])
     
     # Variables SCC
     Z     = @variable(modelo, Z[set.BusSet, set.BusSet, set.TimeSet])  
     mu    = @variable(modelo, mu[set.BusSet, set.GeneratorSet, set.TimeSet])
     
-    return (u=u, p=p, w=w, v=v, theta=theta, Z=Z, mu=mu)
+    return (u=u, p=p, w=w, v=v, theta=theta, Z=Z, mu=mu, p_ibg=p_ibg)
 end
 
 end

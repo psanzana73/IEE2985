@@ -1,16 +1,28 @@
 include("modelo/parametros.jl")
 include("modelo/variables.jl")
 include("modelo/restricciones.jl")
-include("modelo/unit_commitment.jl") 
+# Nota: No incluimos modelo/unit_commitment.jl porque construiremos el modelo manualmente aquí
+# para poder inyectar los parámetros modificados.
 
-using .ModeloUC
+using .Parametros
+using .Conjuntos
+using .Variables
+using .Objetivo
+using .Restricciones
 using .Restricciones: _bus_key, _F
+
+import JuMP
 using DataFrames
-using JuMP: value, set_optimizer_attribute, compute_conflict!, all_constraints, get_optimizer_attribute
+using JuMP: value, set_optimizer_attribute, compute_conflict!, all_constraints, get_optimizer_attribute, Model
+using Gurobi
 using MathOptInterface
 using XLSX
 
 const MOI = MathOptInterface
+
+# =========================
+# FUNCIONES AUXILIARES
+# =========================
 
 function _collect_columns(df::DataFrame)
     names_df = names(df)
@@ -35,6 +47,10 @@ end
 
 _freq_delta_p(par) = hasproperty(par, :freq) ? abs(_F(par.freq.delta_P; default=0.0)) : 0.0
 
+# =========================
+# EXPORTACIÓN DE RESULTADOS
+# =========================
+
 function export_results_to_excel(par, set, var, filepath::AbstractString)
     mkpath(dirname(filepath))
     rows = NamedTuple{(:generator, :bus_id, :time, :u, :p), Tuple{Int, Any, Int, Float64, Float64}}[]
@@ -49,6 +65,7 @@ function export_results_to_excel(par, set, var, filepath::AbstractString)
     end
     gen_df = DataFrame(rows)
 
+    # --- REPORTE DE SCC ---
     scc_rows = NamedTuple{(:bus_index, :bus_id, :time, :I_syn, :I_ibg, :I_total, :I_limit_param, :I_limit_real),
                           Tuple{Int, Any, Int, Float64, Float64, Float64, Float64, Float64}}[]
     
@@ -66,7 +83,6 @@ function export_results_to_excel(par, set, var, filepath::AbstractString)
     end
     alpha_val = _F(par.scc.alpha; default=1.0)
 
-    
     for F in set.BusSet, t in set.TimeSet
         term_syn = 0.0
         for g in G
@@ -79,26 +95,31 @@ function export_results_to_excel(par, set, var, filepath::AbstractString)
                 try term_ibg += _F(par.ibgs[c].If_pu; default=1.0) * alpha_val * value(var.Z[F, Phi[c_idx], t]) catch; end
             end
         end
+
+        # Calcular valores físicos reales (SCC)
+        # IMPORTANTE: Signos negativos para obtener la magnitud física positiva
         I_syn_real   = term_syn
         I_ibg_real   = term_ibg
-        I_total_real = (I_syn_real + I_ibg_real) / value(var.Z[F,F,t])
+        I_total_real = (I_syn_real + I_ibg_real) / value(var.Z[F,F,t])  
 
-        I_limit_param = _F(par.buses[F].IminSCC; default=0.0) # ej: 2.0
-        I_limit_real  = I_limit_param
+        # Calcular el límite real (Lado derecho de la restricción)
+        I_limit_param = _F(par.buses[F].IminSCC; default=0.0) 
+        I_limit_real  = I_limit_param * value(var.Z[F,F,t])  
 
         push!(scc_rows, (
             bus_index = F,
             bus_id    = par.buses[F].bus_id,
             time      = t,
-            I_syn     = I_syn_real,    # Contribución física de SGs
-            I_ibg     = I_ibg_real,    # Contribución física de IBGs
-            I_total   = I_total_real,  # SCC total (debe ser >= I_limit_real)
-            I_limit_param = I_limit_param, # El parámetro base (ej. 2.0)
-            I_limit_real = I_limit_real   # El límite real (ej. 0.2)
+            I_syn     = I_syn_real,    
+            I_ibg     = I_ibg_real,    
+            I_total   = I_total_real,  
+            I_limit_param = I_limit_param, 
+            I_limit_real = I_limit_real   
         ))
     end
     scc_df = DataFrame(scc_rows)
 
+    # --- REPORTE DE FRECUENCIA ---
     freq_sheet = nothing
     if hasproperty(par, :freq)
         freq_rows = NamedTuple{(:time, :inertia_equiv, :rocof, :frequency),
@@ -131,7 +152,6 @@ function export_results_to_excel(par, set, var, filepath::AbstractString)
         freq_sheet = (freq_columns, freq_headers)
     end
 
-    # Esto capturará automáticamente los nuevos nombres de columnas
     gen_columns, gen_headers = _collect_columns(gen_df)
     scc_columns, scc_headers = _collect_columns(scc_df) 
 
@@ -149,63 +169,111 @@ function export_results_to_excel(par, set, var, filepath::AbstractString)
     end
 end
 
-println("Construyendo el modelo...")
-modelo, par, set, var = ModeloUC.construir_modelo()
-bus_map = Dict(_bus_key(par.buses[b].bus_id) => b for b in set.BusSet)
-println("Mapa bus_id -> índice interno:")
-println(bus_map)
-println("Modelo construido. Resolviendo...")
-println("Matriz de impedancias:")
-impedance_df = DataFrame([(
-    from_bus = linea.from_bus,
-    to_bus = linea.to_bus,
-    R = linea.R,
-    X = linea.X,
-    B = linea.B
-) for linea in par.impedances])
-println(impedance_df)
+# ==================================================================================
+# FUNCIÓN DE EJECUCIÓN DE UN SOLO ESCENARIO
+# ==================================================================================
+function run_scenario(input_file::String, scc_req_val::Float64)
+    println("\n" * "="^60)
+    println(" EJECUTANDO ESCENARIO: $input_file")
+    println(" REQUERIMIENTO IminSCC = $scc_req_val p.u.")
+    println("="^60)
 
-set_optimizer_attribute(modelo, "DualReductions", 0)
-println("\n[Acción] Parámetro 'DualReductions = 0' (Gurobi) establecido para forzar estado.")
-
-println("Resolviendo el modelo...")
-status = ModeloUC.solve_modelo(modelo)
-
-if status == MOI.OPTIMAL
-    output_path = joinpath(@__DIR__, "modelo", "data", "output", "resultados.xlsx")
-    export_results_to_excel(par, set, var, output_path)
-    println("Resultados exportados a: $output_path")
-
-elseif status == MOI.INFEASIBLE
-    println("="^50)
-    println("              EL MODELO ES INFACTIBLE              ")
-    println("="^50)
-    println("Calculando el conjunto de restricciones en conflicto (IIS)...")
-    println("Asegúrate de estar usando Gurobi o CPLEX.")
-
-    try
-        compute_conflict!(modelo)
-        iis_status = get_optimizer_attribute(modelo, MOI.ConflictStatus())
-        conflict_constraints = all_constraints(modelo, include_variable_in_set_constraints = true)[iis_status .== MOI.IN_CONFLICT]
-        
-        if isempty(conflict_constraints)
-            println("\nNo se pudo identificar un IIS automáticamente.")
-            println("Verifica que el solver (ej. Gurobi) esté correctamente configurado.")
-        else
-            println("\nSe encontraron $(length(conflict_constraints)) restricciones en conflicto:")
-            
-            for constr_ref in conflict_constraints
-                println("  - ", constr_ref)
-            end
-            println("\nRevisa estas restricciones. El conflicto está entre ellas.")
-        end
-
-    catch e
-        println("\nError al intentar calcular el IIS: $e")
-        println("Asegúrate de que tu versión de JuMP sea compatible y que el solver (Gurobi/CPLEX) esté instalado.")
+    # 1. LEER DATOS CRUDOS
+    # (No construimos el modelo aún, solo leemos los structs)
+    gens, buses_raw, branches, ibgs, scc, freq = Parametros.read_input_data(input_file)
+    
+    # 2. MODIFICAR EL REQUERIMIENTO (IminSCC) EN LOS BUSES
+    # Creamos un nuevo vector de buses con el parámetro actualizado
+    buses_mod = Parametros.BusData[]
+    
+    for bus in buses_raw
+        # Creamos una nueva instancia de BusData reemplazando IminSCC
+        # Conservamos el resto de atributos, incluyendo el B_shunt que añadiste
+        new_bus = Parametros.BusData(
+            bus.bus_id,
+            bus.bus_name,
+            bus.type,
+            bus.Pd,
+            scc_req_val, # <--- AQUÍ SE APLICA EL CAMBIO
+            bus.B_shunt
+        )
+        push!(buses_mod, new_bus)
     end
 
-else
-    println("El modelo no es óptimo. Estado: $status")
-    println("No se exportan resultados.")
+    # 3. EMPAQUETAR PARÁMETROS ACTUALIZADOS
+    par = (generators = gens, 
+           buses      = buses_mod, 
+           impedances = branches, 
+           ibgs       = ibgs, 
+           scc        = scc, 
+           freq       = freq)
+
+    # 4. CONSTRUIR MODELO (Manualmente para usar los nuevos params)
+    println(">> Construyendo modelo matemático...")
+    modelo = Model(Gurobi.Optimizer)
+    set = Conjuntos.definir_conjuntos(par)
+    var = Variables.definir_variables(modelo, set)
+    Objetivo.funcion_objetivo(modelo, par, set, var)
+    Restricciones.generar_restricciones(modelo, par, set, var)
+
+    # 5. CONFIGURAR SOLVER
+    set_optimizer_attribute(modelo, "DualReductions", 0)
+    
+    # 6. RESOLVER
+    println(">> Resolviendo modelo...")
+    status = Restricciones.MOI.get(modelo, Restricciones.MOI.TerminationStatus())
+    # Nota: Para resolver usamos optimize! directamente
+    JuMP.optimize!(modelo)
+    status = JuMP.termination_status(modelo)
+
+    # 7. EXPORTAR
+    base_name = replace(basename(input_file), ".xlsx" => "") 
+    # Nombre refleja el requerimiento: "ReqSCC"
+    output_filename = "resultados_$(base_name)_ReqSCC$(scc_req_val).xlsx"
+    output_path = joinpath(@__DIR__, "modelo", "data", "output", output_filename)
+
+    if status == MOI.OPTIMAL
+        export_results_to_excel(par, set, var, output_path)
+        println(">> [ÉXITO] Costo: $(JuMP.objective_value(modelo))")
+        println(">> Resultados en: $output_path")
+    elseif status == MOI.INFEASIBLE
+        println(">> [FALLO] El modelo es INFACTIBLE.")
+        println(">> (Esto es esperado si el requerimiento es muy alto)")
+    else
+        println(">> [INFO] Estado del solver: $status")
+    end
 end
+
+# ==================================================================================
+# BUCLE PRINCIPAL DE EJECUCIÓN
+# ==================================================================================
+
+# Lista de archivos de entrada
+input_files = [
+    joinpath(@__DIR__, "modelo", "data", "input", "datos_finales30_pen20.xlsx"),
+    joinpath(@__DIR__, "modelo", "data", "input", "datos_finales30_pen50.xlsx"),
+    joinpath(@__DIR__, "modelo", "data", "input", "datos_finales30_pen90.xlsx")
+]
+
+# Lista de valores de REQUERIMIENTO (IminSCC) a probar
+# Al subir este valor, el modelo debería volverse más costoso o infactible
+scc_limit_values = [0.0, 2.0, 3.0, 5.0]
+
+println("Iniciando Batch Run (Variando Requerimiento SCC)...")
+println("Archivos: $(length(input_files))")
+println("Niveles de Requerimiento: $(length(scc_limit_values))")
+
+for file in input_files
+    if !isfile(file)
+        println("\n[ERROR] Archivo no encontrado: $file")
+        continue
+    end
+
+    for val in scc_limit_values
+        run_scenario(file, Float64(val))
+    end
+end
+
+println("\n" * "="^60)
+println(" BATCH RUN COMPLETADO")
+println("="^60)

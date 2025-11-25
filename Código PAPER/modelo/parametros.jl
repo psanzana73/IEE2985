@@ -93,7 +93,7 @@ function read_input_data(data_path::String)
         end
 
         if row.Tipo == 3
-            push!(ibgs, IBGData(row.id, row.Nombre, row.Tipo, row.Pmax, 0.1, 1, row.H))
+            push!(ibgs, IBGData(row.id, row.Nombre, row.Tipo, row.Pmax, 0.1, 1.3, row.H))
         end
     end
 
